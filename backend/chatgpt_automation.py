@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 
 CHATGPT_URL = "https://chatgpt.com/"
 ASSISTANT_MESSAGES = '[data-message-author-role="assistant"]'
+STABLE_READS_FOR_COMPLETION = 3
+SHORT_RESPONSE_MAX_LENGTH = 4
+SHORT_RESPONSE_STABLE_READS_FOR_COMPLETION = 5
 
 StatusCallback = Callable[[str], Awaitable[None]]
 
@@ -111,18 +114,33 @@ class ChatGPTAutomation:
         polling_iterations = 0
         inner_text_calls = 0
         last_selected_key = None
+        selected_message_key = None
         for _ in range(120):
             polling_iterations += 1
             extraction_started = time.monotonic()
             candidates = await self._get_assistant_response_candidates(messages)
-            selected_candidate = self._select_response_candidate(
-                candidates, previous_text_by_key
-            )
+            selected_candidate = None
+            if selected_message_key is not None:
+                selected_candidate = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if candidate["key"] == selected_message_key
+                    ),
+                    None,
+                )
+            if selected_candidate is None:
+                selected_candidate = self._select_response_candidate(
+                    candidates, previous_text_by_key
+                )
+                if selected_candidate is not None:
+                    selected_message_key = selected_candidate["key"]
             current_text = (
                 str(selected_candidate["text"]) if selected_candidate is not None else ""
             )
             inner_text_calls += 1
             response_extraction_elapsed = time.monotonic() - extraction_started
+            generation_state = await self._get_generation_state(page)
             if selected_candidate is not None:
                 selected_key = str(selected_candidate["key"])
                 if selected_key != last_selected_key:
@@ -171,7 +189,70 @@ class ChatGPTAutomation:
             )
             if current_text and current_text == last_text:
                 stable_reads += 1
-                if stable_reads >= 3:
+                generation_active = generation_state["generation_active"]
+                visible_stop_controls = int(generation_state["visible_stop_controls"])
+                is_short_ambiguous_response = (
+                    len(current_text) <= SHORT_RESPONSE_MAX_LENGTH
+                    and generation_active is None
+                )
+                required_stable_reads = (
+                    SHORT_RESPONSE_STABLE_READS_FOR_COMPLETION
+                    if is_short_ambiguous_response
+                    else STABLE_READS_FOR_COMPLETION
+                )
+                complete = (
+                    visible_stop_controls == 0
+                    and stable_reads >= required_stable_reads
+                )
+                if visible_stop_controls:
+                    completion_reason = "visible_stop_generation_control"
+                elif is_short_ambiguous_response and not complete:
+                    completion_reason = "short_response_requires_extra_stability"
+                elif complete:
+                    completion_reason = "stable_text_no_visible_stop"
+                else:
+                    completion_reason = "waiting_for_stable_text"
+                logger.info(
+                    "[RESPONSE_DETECT] message_id=%s text_length=%d stable_reads=%d "
+                    "generation_active=%s visible_stop_controls=%d "
+                    "visible_send_controls=%d completion_reason=%s complete=%s",
+                    selected_candidate["message_id"] if selected_candidate else None,
+                    len(current_text),
+                    stable_reads,
+                    generation_active,
+                    visible_stop_controls,
+                    generation_state["visible_send_controls"],
+                    completion_reason,
+                    complete,
+                )
+                if complete:
+                    final_candidates = await self._get_assistant_response_candidates(messages)
+                    final_candidate = next(
+                        (
+                            candidate
+                            for candidate in final_candidates
+                            if candidate["key"] == selected_message_key
+                        ),
+                        None,
+                    )
+                    final_text = (
+                        str(final_candidate["text"])
+                        if final_candidate is not None
+                        else ""
+                    )
+                    if final_text != current_text:
+                        logger.info(
+                            "[RESPONSE_DETECT] selected_message_updated_during_completion "
+                            "message_id=%s previous_text_length=%d current_text_length=%d",
+                            selected_candidate["message_id"] if selected_candidate else None,
+                            len(current_text),
+                            len(final_text),
+                        )
+                        stable_reads = 0
+                        last_text = final_text
+                        last_text_changed_at = time.monotonic()
+                        await asyncio.sleep(0.5)
+                        continue
                     final_count = await messages.count()
                     response_stable_at = time.monotonic()
                     logger.info(
@@ -233,3 +314,44 @@ class ChatGPTAutomation:
             and str(candidate["text"]) != previous_text_by_key.get(str(candidate["key"]))
         ]
         return changed_candidates[-1] if changed_candidates else None
+
+    async def _get_generation_state(self, page: Page) -> dict[str, object]:
+        """Read only visible, enabled composer controls; stale DOM controls are ignored."""
+        return await page.evaluate(
+            """() => {
+                const textarea = document.querySelector("#prompt-textarea");
+                const composer = textarea?.closest("form");
+                const isVisibleAndEnabled = (element) => {
+                    if (!element || element.disabled || element.getAttribute("aria-disabled") === "true") {
+                        return false;
+                    }
+                    const style = window.getComputedStyle(element);
+                    const rect = element.getBoundingClientRect();
+                    return style.visibility !== "hidden" && style.display !== "none" &&
+                        rect.width > 0 && rect.height > 0;
+                };
+                const controls = composer
+                    ? Array.from(composer.querySelectorAll("button, input[type='submit']"))
+                    : [];
+                const matchingControlCount = (labels, testIds) => controls.filter((element) => {
+                    const ariaLabel = (element.getAttribute("aria-label") || "").trim();
+                    const testId = (element.getAttribute("data-testid") || "").trim();
+                    return isVisibleAndEnabled(element) &&
+                        (labels.includes(ariaLabel) || testIds.includes(testId));
+                }).length;
+                const visibleStopControls = matchingControlCount(
+                    ["Stop", "Stop generating"],
+                    ["stop-button", "stop-generating-button"]
+                );
+                const visibleSendControls = matchingControlCount(
+                    ["Send", "Send message", "Send prompt"],
+                    ["send-button", "send-message-button", "send-prompt-button"]
+                );
+                return {
+                    generation_active: visibleStopControls ? true :
+                        (visibleSendControls ? false : null),
+                    visible_stop_controls: visibleStopControls,
+                    visible_send_controls: visibleSendControls,
+                };
+            }"""
+        )
