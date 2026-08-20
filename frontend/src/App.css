@@ -1,0 +1,128 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap');
+
+:root {
+  font-family: 'Manrope', sans-serif;
+  color: #19211d;
+  background: #f5f7f3;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; min-width: 320px; }
+
+button, textarea { font: inherit; }
+
+.app-shell {
+  min-height: 100vh;
+  padding: clamp(24px, 6vw, 76px) 20px 28px;
+  background: radial-gradient(circle at 15% 5%, #e5f0e8 0, transparent 28rem), #f5f7f3;
+}
+
+.assistant-panel { max-width: 760px; margin: 0 auto; }
+
+.app-header { display: flex; align-items: center; gap: 15px; margin-bottom: 48px; }
+
+.brand-mark {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 14px;
+  background: #193b30;
+  color: #d7f06a;
+  font: 500 14px 'DM Mono', monospace;
+  letter-spacing: 0;
+}
+
+.eyebrow, .hint, .version-note, legend, .status-dot { font: 500 11px 'DM Mono', monospace; letter-spacing: .02em; }
+.eyebrow { margin: 0 0 5px; color: #6b766f; text-transform: uppercase; }
+h1, h2, p { margin-top: 0; }
+h1 { margin-bottom: 0; font-size: clamp(27px, 5vw, 38px); line-height: 1.1; letter-spacing: 0; }
+
+.prompt-form { border-top: 1px solid #d9e0d9; padding-top: 24px; }
+.provider-group { border: 0; padding: 0; margin: 0 0 30px; }
+legend, .prompt-label, h2 { font-weight: 700; }
+legend { margin-bottom: 12px; color: #6b766f; text-transform: uppercase; }
+.provider-options { display: flex; flex-wrap: wrap; gap: 9px; }
+.provider-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 15px;
+  border: 1px solid #d8e0d8;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .52);
+  color: #59665e;
+  cursor: pointer;
+  font-size: 14px;
+  transition: border-color .2s ease, background .2s ease, color .2s ease;
+}
+.provider-option.selected { border-color: #193b30; background: #fff; color: #193b30; }
+.provider-option input { position: absolute; opacity: 0; pointer-events: none; }
+.provider-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--provider-color); }
+
+.prompt-label { display: block; margin-bottom: 10px; font-size: 14px; }
+textarea {
+  display: block;
+  width: 100%;
+  min-height: 184px;
+  resize: vertical;
+  padding: 17px 18px;
+  border: 1px solid #cfd9d0;
+  border-radius: 8px;
+  outline: none;
+  background: #fff;
+  color: #19211d;
+  font-size: 15px;
+  line-height: 1.65;
+  transition: border-color .2s ease, box-shadow .2s ease;
+}
+textarea:focus { border-color: #628b77; box-shadow: 0 0 0 3px rgba(98, 139, 119, .15); }
+textarea::placeholder { color: #a1aba4; }
+.form-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 12px; }
+.hint { color: #89938c; }
+button {
+  display: inline-flex;
+  align-items: center;
+  gap: 13px;
+  border: 0;
+  border-radius: 7px;
+  padding: 12px 16px 12px 18px;
+  background: #193b30;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  transition: background .2s ease, opacity .2s ease, transform .2s ease;
+}
+button:hover:not(:disabled) { background: #2b5a48; transform: translateY(-1px); }
+button:disabled { cursor: not-allowed; opacity: .48; }
+button span { color: #d7f06a; font-size: 17px; line-height: 1; }
+
+.response-section { margin-top: 56px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+h2 { margin: 0; font-size: 15px; }
+.status-dot { color: #4e8067; }
+.response-box {
+  min-height: 132px;
+  max-height: 290px;
+  overflow-y: auto;
+  padding: 18px;
+  border: 1px dashed #bdc9be;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .34);
+}
+.response-box p { white-space: pre-wrap; margin: 0; font-size: 14px; line-height: 1.7; }
+.response-box.has-content { border-style: solid; border-color: #d2ddd3; background: #fff; }
+.empty-state { color: #9aa49d; }
+.error-message { color: #a4483c; }
+.version-note { max-width: 760px; margin: 36px auto 0; color: #a0aaa2; }
+
+@media (max-width: 540px) {
+  .app-header { margin-bottom: 35px; }
+  .form-footer { align-items: flex-start; flex-direction: column; }
+  button { width: 100%; justify-content: center; }
+  .version-note { margin-top: 28px; }
+}
