@@ -35,6 +35,9 @@ class ChatGPTAutomation:
             logger.info("[TIMING] before_prompt_insertion=%.3fs", time.monotonic() - ask_started)
             assistant_messages = page.locator(ASSISTANT_MESSAGES)
             message_count = await assistant_messages.count()
+            previous_candidates = await self._get_assistant_response_candidates(
+                assistant_messages
+            )
             logger.info("[TIMING] existing_assistant_messages=%d", message_count)
 
             prompt_fill_started = time.monotonic()
@@ -44,7 +47,7 @@ class ChatGPTAutomation:
             await prompt_input.press("Enter")
             logger.info("[TIMING] submit=%.3fs", time.monotonic() - submit_started)
             await set_status("Waiting for response...")
-            return await self._read_new_response(page, message_count)
+            return await self._read_new_response(page, previous_candidates)
         except PlaywrightTimeoutError as error:
             logger.warning("ChatGPT automation timed out: %s", error)
             raise RuntimeError(
@@ -90,36 +93,64 @@ class ChatGPTAutomation:
         await locator.wait_for(state="visible", timeout=timeout)
         return locator
 
-    async def _read_new_response(self, page: Page, previous_count: int) -> str:
+    async def _read_new_response(
+        self, page: Page, previous_candidates: list[dict[str, object]]
+    ) -> str:
         messages = page.locator(ASSISTANT_MESSAGES)
         wait_started = time.monotonic()
-        await page.wait_for_function(
-            "([selector, count]) => document.querySelectorAll(selector).length > count",
-            arg=[ASSISTANT_MESSAGES, previous_count],
-            timeout=120000,
-        )
-        response_dom_appeared_at = time.monotonic()
-        logger.info(
-            "[TIMING] response_dom_appeared_at=%.6f wait_new_message=%.3fs",
-            response_dom_appeared_at,
-            response_dom_appeared_at - wait_started,
-        )
-        latest = messages.last
-        await latest.wait_for(state="visible", timeout=10000)
-
         polling_started = time.monotonic()
         logger.info("[TIMING] response_polling_start")
+        previous_text_by_key = {
+            str(candidate["key"]): str(candidate["text"])
+            for candidate in previous_candidates
+        }
         last_text = ""
-        last_text_changed_at = response_dom_appeared_at
+        last_text_changed_at = polling_started
+        response_dom_appeared_at = None
         stable_reads = 0
         polling_iterations = 0
         inner_text_calls = 0
+        last_selected_key = None
         for _ in range(120):
             polling_iterations += 1
             extraction_started = time.monotonic()
-            current_text = (await latest.inner_text()).strip()
+            candidates = await self._get_assistant_response_candidates(messages)
+            selected_candidate = self._select_response_candidate(
+                candidates, previous_text_by_key
+            )
+            current_text = (
+                str(selected_candidate["text"]) if selected_candidate is not None else ""
+            )
             inner_text_calls += 1
             response_extraction_elapsed = time.monotonic() - extraction_started
+            if selected_candidate is not None:
+                selected_key = str(selected_candidate["key"])
+                if selected_key != last_selected_key:
+                    logger.info(
+                        "[RESPONSE_DETECT] candidate_count=%d candidate_ids=%s "
+                        "content_lengths=%s selected_message_id=%s selected_text_length=%d",
+                        len(candidates),
+                        [candidate["message_id"] for candidate in candidates],
+                        [len(str(candidate["text"])) for candidate in candidates],
+                        selected_candidate["message_id"],
+                        len(current_text),
+                    )
+                    last_selected_key = selected_key
+                if response_dom_appeared_at is None:
+                    response_dom_appeared_at = time.monotonic()
+                    logger.info(
+                        "[TIMING] response_dom_appeared_at=%.6f wait_new_message=%.3fs",
+                        response_dom_appeared_at,
+                        response_dom_appeared_at - wait_started,
+                    )
+            elif polling_iterations == 1 or polling_iterations % 10 == 0:
+                logger.info(
+                    "[RESPONSE_DETECT] candidate_count=%d candidate_ids=%s "
+                    "content_lengths=%s selected_message_id=None selected_text_length=0",
+                    len(candidates),
+                    [candidate["message_id"] for candidate in candidates],
+                    [len(str(candidate["text"])) for candidate in candidates],
+                )
             if current_text != last_text:
                 text_changed_at = time.monotonic()
                 logger.info(
@@ -149,7 +180,7 @@ class ChatGPTAutomation:
                         "response_extraction=%.3fs polling_iterations=%d "
                         "inner_text_calls=%d final_assistant_messages=%d",
                         response_stable_at,
-                        response_stable_at - response_dom_appeared_at,
+                        response_stable_at - (response_dom_appeared_at or polling_started),
                         response_stable_at - last_text_changed_at,
                         response_extraction_elapsed,
                         polling_iterations,
@@ -169,3 +200,36 @@ class ChatGPTAutomation:
             last_text = current_text
             await asyncio.sleep(0.5)
         raise RuntimeError("ChatGPT response did not finish in time.")
+
+    async def _get_assistant_response_candidates(self, messages) -> list[dict[str, object]]:
+        """Extract content only from individual assistant-message containers."""
+        candidates = await messages.evaluate_all(
+            """elements => elements.map((element, index) => {
+                const textOf = (node) => (node?.innerText || "").trim();
+                const copyTargetText = textOf(
+                    element.querySelector("[data-dil-widget-copy-target]")
+                );
+                const markdownText = Array.from(element.querySelectorAll(".markdown"))
+                    .map(textOf)
+                    .filter(Boolean)
+                    .join("\\n");
+                const text = copyTargetText || markdownText || textOf(element);
+                const messageId = element.getAttribute("data-message-id");
+                return { index, message_id: messageId, text };
+            })"""
+        )
+        for candidate in candidates:
+            candidate["key"] = candidate["message_id"] or f"index:{candidate['index']}"
+        return candidates
+
+    @staticmethod
+    def _select_response_candidate(
+        candidates: list[dict[str, object]], previous_text_by_key: dict[str, str]
+    ) -> dict[str, object] | None:
+        changed_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate["text"]
+            and str(candidate["text"]) != previous_text_by_key.get(str(candidate["key"]))
+        ]
+        return changed_candidates[-1] if changed_candidates else None
