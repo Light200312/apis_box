@@ -114,9 +114,6 @@ class ChatGPTAutomation:
         stable_reads = 0
         polling_iterations = 0
         inner_text_calls = 0
-        stop_button_queries = 0
-        previous_stop_state = None
-        stop_generation_completed_at = None
         for _ in range(120):
             polling_iterations += 1
             extraction_started = time.monotonic()
@@ -132,82 +129,38 @@ class ChatGPTAutomation:
                     len(current_text),
                 )
                 last_text_changed_at = text_changed_at
-            stop_button_queries += 1
-            stop_buttons = page.locator(
-                "button[aria-label*='Stop'], button[data-testid*='stop']"
-            )
-            matching_stop_button_count = await stop_buttons.count()
-            stop_button_present = matching_stop_button_count > 0
-            for stop_button_index in range(matching_stop_button_count):
-                stop_button = stop_buttons.nth(stop_button_index)
-                metadata = await stop_button.evaluate(
-                    """element => ({
-                        tag_name: element.tagName,
-                        aria_label: element.getAttribute('aria-label'),
-                        data_testid: element.getAttribute('data-testid'),
-                        outer_html: element.outerHTML.slice(0, 500)
-                    })"""
-                )
-                logger.info(
-                    "[DOM] stop_button index=%d tag=%s aria_label=%r data_testid=%r "
-                    "visible=%s enabled=%s outer_html=%r",
-                    stop_button_index,
-                    metadata["tag_name"],
-                    metadata["aria_label"],
-                    metadata["data_testid"],
-                    await stop_button.is_visible(),
-                    await stop_button.is_enabled(),
-                    metadata["outer_html"],
-                )
-            stop_state_changed = previous_stop_state is not None and stop_button_present != previous_stop_state
-            if stop_state_changed or previous_stop_state is None:
-                stop_state_changed_at = time.monotonic()
-                logger.info(
-                    "[TIMING] stop_button_state_at=%.6f elapsed=%.3fs present=%s changed=%s",
-                    stop_state_changed_at,
-                    stop_state_changed_at - response_dom_appeared_at,
-                    stop_button_present,
-                    stop_state_changed,
-                )
-                if previous_stop_state is True and not stop_button_present:
-                    stop_generation_completed_at = stop_state_changed_at
-            previous_stop_state = stop_button_present
             logger.info(
                 "[POLL] iteration=%d current_text_length=%d previous_text_length=%d "
-                "text_changed=%s stable_reads=%d stop_button_present=%s "
-                "matching_stop_button_count=%d",
+                "text_changed=%s stable_reads=%d",
                 polling_iterations,
                 len(current_text),
                 len(last_text),
                 current_text != last_text,
                 stable_reads,
-                stop_button_present,
-                matching_stop_button_count,
             )
-            if current_text and current_text == last_text and not stop_button_present:
+            if current_text and current_text == last_text:
                 stable_reads += 1
                 if stable_reads >= 3:
                     final_count = await messages.count()
                     response_stable_at = time.monotonic()
-                    stop_to_stable = (
-                        response_stable_at - stop_generation_completed_at
-                        if stop_generation_completed_at is not None
-                        else None
-                    )
                     logger.info(
                         "[TIMING] response_stable_at=%.6f elapsed=%.3fs "
-                        "last_text_change_to_stable=%.3fs stop_to_stable=%s "
+                        "last_text_change_to_stable=%.3fs "
                         "response_extraction=%.3fs polling_iterations=%d "
-                        "inner_text_calls=%d stop_button_queries=%d final_assistant_messages=%d",
+                        "inner_text_calls=%d final_assistant_messages=%d",
                         response_stable_at,
                         response_stable_at - response_dom_appeared_at,
                         response_stable_at - last_text_changed_at,
-                        f"{stop_to_stable:.3f}s" if stop_to_stable is not None else "unavailable",
                         response_extraction_elapsed,
                         polling_iterations,
                         inner_text_calls,
-                        stop_button_queries,
                         final_count,
+                    )
+                    logger.info(
+                        "[POLL] response_stable iteration=%d stable_reads=%d text_length=%d",
+                        polling_iterations,
+                        stable_reads,
+                        len(current_text),
                     )
                     logger.info("Response received")
                     return current_text
