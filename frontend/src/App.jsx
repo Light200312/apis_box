@@ -4,6 +4,8 @@ const providers = [
   { id: 'chatgpt', label: 'ChatGPT', color: '#74aa9c' },
   { id: 'claude', label: 'Claude', color: '#d97757' },
   { id: 'gemini', label: 'Gemini', color: '#5578e5' },
+  { id: 'grok', label: 'Grok', color: '#111111' },
+  { id: 'deepseek', label: 'DeepSeek', color: '#4b6bff' },
 ]
 
 function App() {
