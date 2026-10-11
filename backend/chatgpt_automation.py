@@ -5,13 +5,20 @@ from typing import Awaitable, Callable
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from browser_manager import BrowserManager
+from browser_manager import CHATGPT_PROMPT_INPUT_SELECTOR, BrowserManager
 
 
 logger = logging.getLogger(__name__)
 
 CHATGPT_URL = "https://chatgpt.com/"
-ASSISTANT_MESSAGES = '[data-message-author-role="assistant"]'
+ASSISTANT_MESSAGES = (
+    '[data-message-author-role="assistant"], '
+    '[data-chatgpt-selection-message-id]'
+)
+USER_MESSAGES = (
+    '[data-message-author-role="user"], '
+    '[data-chatgpt-search-unit-key$=":user"]'
+)
 STABLE_READS_FOR_COMPLETION = 3
 SHORT_RESPONSE_MAX_LENGTH = 4
 SHORT_RESPONSE_STABLE_READS_FOR_COMPLETION = 5
@@ -47,7 +54,7 @@ class ChatGPTAutomation:
             await prompt_input.fill(prompt)
             logger.info("[TIMING] prompt_fill=%.3fs", time.monotonic() - prompt_fill_started)
             submit_started = time.monotonic()
-            await prompt_input.press("Enter")
+            await self._submit_prompt(page, prompt_input)
             logger.info("[TIMING] submit=%.3fs", time.monotonic() - submit_started)
             await set_status("Waiting for response...")
             return await self._read_new_response(page, previous_candidates)
@@ -92,9 +99,31 @@ class ChatGPTAutomation:
             return False
 
     async def _find_prompt_input(self, page: Page, timeout: int = 10000):
-        locator = page.locator('#prompt-textarea[contenteditable="true"]')
+        locator = page.locator(CHATGPT_PROMPT_INPUT_SELECTOR).first
         await locator.wait_for(state="visible", timeout=timeout)
         return locator
+
+    async def _submit_prompt(self, page: Page, prompt_input) -> None:
+        """Submit the composer and fall back to its send button if Enter is ignored."""
+        previous_user_count = await page.locator(USER_MESSAGES).count()
+        await prompt_input.press("Enter")
+
+        for _ in range(8):
+            if await page.locator(USER_MESSAGES).count() > previous_user_count:
+                return
+            if not (await prompt_input.inner_text()).strip():
+                return
+            await asyncio.sleep(0.2)
+
+        send_button = page.locator(
+            'form button[aria-label="Send"], '
+            'form button[aria-label="Send message"], '
+            'form button[data-testid="send-button"], '
+            'form button[data-testid="send-message-button"]'
+        ).last
+        if await send_button.count() == 0:
+            raise RuntimeError("ChatGPT did not accept the prompt from the composer.")
+        await send_button.click()
 
     async def _read_new_response(
         self, page: Page, previous_candidates: list[dict[str, object]]
@@ -290,12 +319,16 @@ class ChatGPTAutomation:
                 const copyTargetText = textOf(
                     element.querySelector("[data-dil-widget-copy-target]")
                 );
-                const markdownText = Array.from(element.querySelectorAll(".markdown"))
+                const currentMarkdownText = textOf(
+                    element.querySelector('[data-markdown-text-style="assistant-message"]')
+                );
+                const legacyMarkdownText = Array.from(element.querySelectorAll(".markdown"))
                     .map(textOf)
                     .filter(Boolean)
                     .join("\\n");
-                const text = copyTargetText || markdownText || textOf(element);
-                const messageId = element.getAttribute("data-message-id");
+                const text = copyTargetText || currentMarkdownText || legacyMarkdownText || textOf(element);
+                const messageId = element.getAttribute("data-message-id") ||
+                    element.getAttribute("data-chatgpt-selection-message-id");
                 return { index, message_id: messageId, text };
             })"""
         )
@@ -318,9 +351,9 @@ class ChatGPTAutomation:
     async def _get_generation_state(self, page: Page) -> dict[str, object]:
         """Read only visible, enabled composer controls; stale DOM controls are ignored."""
         return await page.evaluate(
-            """() => {
-                const textarea = document.querySelector("#prompt-textarea");
-                const composer = textarea?.closest("form");
+            """(promptInputSelector) => {
+                const promptInput = document.querySelector(promptInputSelector);
+                const composer = promptInput?.closest("form");
                 const isVisibleAndEnabled = (element) => {
                     if (!element || element.disabled || element.getAttribute("aria-disabled") === "true") {
                         return false;
@@ -353,5 +386,6 @@ class ChatGPTAutomation:
                     visible_stop_controls: visibleStopControls,
                     visible_send_controls: visibleSendControls,
                 };
-            }"""
+            }""",
+            CHATGPT_PROMPT_INPUT_SELECTOR,
         )

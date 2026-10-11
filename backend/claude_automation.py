@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_URL_PARTS = ("claude.ai", "www.claude.ai")
 CLAUDE_RESPONSE_CANDIDATES = (
+    "[data-testid='assistant-message']",
     "[data-testid='transcript-row'] > [role='article']",
     "[data-message-author-role='assistant']",
     "[data-testid='message']",
@@ -59,13 +60,31 @@ class ClaudeAutomation:
 
     async def _find_claude_page(self) -> Page:
         context = await self.browser_manager.get_or_start()
-        for page in context.pages:
-            if page.is_closed() or not any(part in page.url for part in CLAUDE_URL_PARTS):
+        pages = context.pages
+        for page in pages:
+            if page.is_closed():
                 continue
-            title = await page.title()
-            if "claude" in title.lower() or "claude" in page.url.lower():
-                logger.info("[BROWSER] Claude tab found url=%s title=%r", page.url, title)
+            if any(part in page.url for part in CLAUDE_URL_PARTS):
+                logger.info("[BROWSER] Claude tab found url=%s", page.url)
                 return page
+
+        for page in pages:
+            if page.is_closed() or page.url:
+                continue
+            session = await context.new_cdp_session(page)
+            try:
+                target_info = await session.send("Target.getTargetInfo")
+                page_url = target_info.get("targetInfo", {}).get("url", "")
+            finally:
+                await session.detach()
+            if any(part in page_url for part in CLAUDE_URL_PARTS):
+                logger.info(
+                    "[BROWSER] Reopening Claude target through a managed tab url=%s",
+                    page_url,
+                )
+                managed_page = await context.new_page()
+                await managed_page.goto(page_url, wait_until="domcontentloaded")
+                return managed_page
         raise RuntimeError(
             "No existing Claude tab was found. Open Claude in the Chrome instance "
             "already connected through CDP, then try again."
@@ -212,7 +231,10 @@ class ClaudeAutomation:
                 const responseBody = element.querySelector(
                     ".font-claude-response-body, .progressive-markdown"
                 );
+                const replyText = element.querySelector("[data-perf-reply-text]");
                 const text = (
+                    replyText?.innerText ||
+                    replyText?.textContent ||
                     responseBody?.innerText ||
                     responseBody?.textContent ||
                     ""
@@ -238,7 +260,8 @@ class ClaudeAutomation:
                     !isUserMessage &&
                     (element.getAttribute("data-message-author-role") === "assistant" ||
                         isTranscriptAssistant ||
-                        testid === "message")
+                        testid === "message" ||
+                        testid === "assistant-message")
                 );
                 const messageIndex = isAssistant ? assistantIndex++ : null;
                 const id = element.getAttribute("data-message-id") ||

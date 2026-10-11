@@ -10,6 +10,10 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 logger = logging.getLogger(__name__)
 CDP_ENDPOINT = "http://127.0.0.1:9222"
 CHATGPT_URL_PARTS = ("chatgpt.com", "chat.openai.com")
+CHATGPT_PROMPT_INPUT_SELECTOR = (
+    '#prompt-textarea[contenteditable="true"], '
+    '[role="textbox"][contenteditable="true"][aria-label="Ask ChatGPT"]'
+)
 
 
 class BrowserConnectionError(RuntimeError):
@@ -113,7 +117,7 @@ class BrowserManager:
                         "/auth/" not in page.url
                         and "/login" not in page.url
                         and await page.locator(
-                            '#prompt-textarea[contenteditable="true"]'
+                            CHATGPT_PROMPT_INPUT_SELECTOR
                         ).count() > 0
                     )
                     break
