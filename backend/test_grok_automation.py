@@ -29,6 +29,17 @@ def test_ignores_non_assistant_status_candidate():
     assert selected is None
 
 
+def test_clean_response_text_removes_grok_label_prefix():
+    assert GrokAutomation._clean_response_text("Grok said\n8") == "8"
+    assert GrokAutomation._clean_response_text("Grok\n8") == "8"
+
+
+def test_clean_response_text_preserves_response_starting_with_grok():
+    response = "Grok is useful for this example."
+
+    assert GrokAutomation._clean_response_text(response) == response
+
+
 class SequenceGrokAutomation(GrokAutomation):
     def __init__(self, candidates, states):
         self.candidates = iter(candidates)

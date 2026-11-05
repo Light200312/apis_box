@@ -73,6 +73,7 @@ Useful endpoints:
 
 - `GET /api/status` checks the Chrome connection state.
 - `POST /api/ask` sends a prompt to a selected provider.
+- `POST /v1/messages` is a local, text-only Anthropic Messages compatibility adapter.
 - `GET /docs` opens the interactive FastAPI documentation.
 
 ### 4. Start the React frontend
@@ -136,6 +137,63 @@ Example response:
 }
 ```
 
+## Claude Code compatibility adapter
+
+`POST /v1/messages` keeps `/api/ask` intact and routes Messages requests to the
+existing Claude browser automation first. It makes at most one ChatGPT fallback
+attempt only when Claude fails *before* the prompt can be submitted. The
+`x-apis-box-provider` response header records which provider produced the
+answer. If Claude may already have received the prompt, fallback is suppressed
+and the request returns an error instead of risking duplicate work.
+
+The adapter accepts text messages and returns the Anthropic Messages response
+shape. It also emits the standard SSE event sequence when `"stream": true`,
+but browser automation only exposes an answer after the provider page finishes
+generating it. Therefore the response is sent as one final text delta, not live
+token streaming. Token counts are `0`, because browser automation cannot report
+provider token accounting.
+
+It does **not** support native `tool_use`, image/document inputs, or forced
+tool calls. Claude Code 2.1.309 is installed in this workspace and normally
+sends tool definitions for coding-agent work. This adapter can serve plain-text
+Messages clients, but it cannot safely power autonomous file edits, terminal
+commands, or reliable Claude Code coding-agent loops through browser sessions.
+Use an official/provider API-compatible service for that workflow.
+
+To test the adapter after starting Chrome and the backend:
+
+```bash
+curl http://127.0.0.1:8000/v1/messages \
+  --header 'content-type: application/json' \
+  --header 'x-api-key: local-browser-adapter' \
+  --data '{
+    "model": "claude-browser",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "Reply with one word: hello"}]
+  }'
+```
+
+The installed VS Code extension (`anthropic.claude-code` 2.1.309) supports
+environment variables through its settings. If you want to experiment with the
+text-only adapter, add the following to VS Code **User Settings (JSON)** and
+restart the Claude Code session:
+
+```json
+{
+  "claudeCode.environmentVariables": [
+    { "name": "ANTHROPIC_BASE_URL", "value": "http://127.0.0.1:8000" },
+    { "name": "ANTHROPIC_AUTH_TOKEN", "value": "local-browser-adapter" }
+  ],
+  "claudeCode.disableLoginPrompt": true
+}
+```
+
+`ANTHROPIC_BASE_URL` deliberately points to the server root: Claude Code adds
+`/v1/messages` itself. The opaque token is expected by Claude Code but is not
+validated or forwarded by this local server. Keep the FastAPI service and Chrome DevTools endpoint
+bound to loopback (`127.0.0.1`); do not expose port `9222` or this adapter to
+your network.
+
 ## Troubleshooting
 
 ### Chrome is unavailable
@@ -167,6 +225,12 @@ Run the focused automation tests from `backend`:
 ```bash
 source .venv/bin/activate
 pytest -q test_claude_automation.py test_gemini_automation.py test_grok_automation.py test_deepseek_automation.py
+```
+
+The Messages adapter has focused protocol and fallback tests as well:
+
+```bash
+pytest -q test_anthropic_adapter.py
 ```
 
 Compile the backend modules:

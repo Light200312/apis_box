@@ -11,11 +11,18 @@ from browser_manager import BrowserManager
 logger = logging.getLogger(__name__)
 
 GROK_URL_PARTS = ("grok.com", "x.com", "twitter.com")
+
+# Updated selectors for the new TipTap ProseMirror editor.
+# The primary input is now a contenteditable div with role="combobox".
 GROK_PROMPT_SELECTORS = (
+    "div[contenteditable='true'][role='combobox'][aria-label*='Grok']",
+    "div[contenteditable='true'][role='combobox']",
+    "div.tiptap.ProseMirror[contenteditable='true']",
+    "div[contenteditable='true'][role='textbox']",
+    # Legacy fallbacks
     "textarea[data-testid='grok-chat-input']",
     "textarea[placeholder*='Ask Grok']",
     "textarea[placeholder*='Message Grok']",
-    "div[contenteditable='true'][role='textbox']",
     "textarea",
 )
 GROK_RESPONSE_SELECTORS = (
@@ -46,8 +53,8 @@ class GrokAutomation:
                 if candidate.get("id")
             }
 
-            await prompt_input.fill(prompt)
-            await prompt_input.press("Enter")
+            await self._enter_prompt(prompt_input, prompt)
+            await self._submit_prompt(page, prompt_input)
             return await self._read_new_response(page, previous_text_by_id)
         except PlaywrightTimeoutError as error:
             raise RuntimeError(
@@ -75,6 +82,52 @@ class GrokAutomation:
         prompt_input = page.locator(", ".join(GROK_PROMPT_SELECTORS)).first
         await prompt_input.wait_for(state="visible", timeout=timeout)
         return prompt_input
+
+    async def _enter_prompt(self, prompt_input: Locator, prompt: str) -> None:
+        """Enter text into the Grok composer.
+
+        The new Grok UI uses a TipTap/ProseMirror contenteditable div
+        (role="combobox") instead of a plain textarea.  Playwright's
+        ``fill()`` does not work reliably on contenteditable elements,
+        so we click to focus, clear any existing content, then type the
+        prompt character-by-character.
+        """
+        tag = await prompt_input.evaluate("el => el.tagName.toLowerCase()")
+
+        if tag == "textarea":
+            # Legacy path — plain textarea still works with fill().
+            await prompt_input.fill(prompt)
+            return
+
+        # Contenteditable path (TipTap / ProseMirror).
+        await prompt_input.click()
+        # Select-all + delete to clear any existing text.
+        await prompt_input.press("Control+a")
+        await prompt_input.press("Backspace")
+        await prompt_input.type(prompt, delay=5)
+
+    async def _submit_prompt(self, page: Page, prompt_input: Locator) -> None:
+        """Submit the composed prompt via Enter, falling back to the send button."""
+        await prompt_input.press("Enter")
+
+        # Give Grok a moment to register the submission.
+        await asyncio.sleep(0.3)
+
+        # Check if prompt was actually submitted (input should be cleared).
+        remaining = await prompt_input.evaluate(
+            "el => (el.innerText || el.value || '').trim()"
+        )
+        if not remaining:
+            return
+
+        # Fallback: look for a send / submit button.
+        send_button = page.locator(
+            "button[aria-label*='Send'], "
+            "button[data-testid*='send'], "
+            "button[type='submit']"
+        ).first
+        if await send_button.count() > 0:
+            await send_button.click()
 
     async def _read_new_response(
         self, page: Page, previous_text_by_id: dict[str, str]
@@ -124,7 +177,15 @@ class GrokAutomation:
 
     @staticmethod
     def _clean_response_text(text: str) -> str:
-        return text.strip().replace("\r\n", "\n").strip()
+        cleaned = text.strip().replace("\r\n", "\n")
+        for prefix in ("grok responded", "grok said"):
+            if cleaned.lower().startswith(prefix):
+                cleaned = cleaned[len(prefix) :].lstrip("\n: -")
+                break
+        else:
+            if cleaned.lower().startswith(("grok\n", "grok:", "grok-")):
+                cleaned = cleaned[4:].lstrip("\n: -")
+        return cleaned.strip()
 
     async def _get_response_candidates(self, page: Page) -> list[dict[str, Any]]:
         selector = ", ".join(GROK_RESPONSE_SELECTORS)
@@ -150,11 +211,16 @@ class GrokAutomation:
     async def _get_composer_state(self, page: Page) -> dict[str, Any]:
         return await page.evaluate(
             """() => {
+                // Updated selectors for the new TipTap/ProseMirror composer.
                 const prompt = document.querySelector(
+                    "div[contenteditable='true'][role='combobox'][aria-label*='Grok'], " +
+                    "div[contenteditable='true'][role='combobox'], " +
+                    "div.tiptap.ProseMirror[contenteditable='true'], " +
+                    "div[contenteditable='true'][role='textbox'], " +
                     "textarea[data-testid='grok-chat-input'], " +
                     "textarea[placeholder*='Ask Grok'], " +
                     "textarea[placeholder*='Message Grok'], " +
-                    "div[contenteditable='true'][role='textbox'], textarea"
+                    "textarea"
                 );
                 const visible = element => {
                     if (!element) return false;
@@ -163,20 +229,40 @@ class GrokAutomation:
                     return style.display !== 'none' && style.visibility !== 'hidden' &&
                         rect.width > 0 && rect.height > 0;
                 };
-                const buttons = Array.from(document.querySelectorAll('button')).filter(visible);
-                const generationActive = buttons.some(button => {
+                // Look within the composer container (.query-bar) or fall back to all buttons.
+                const composerContainer = prompt?.closest('.query-bar') || prompt?.closest('form');
+                const allButtons = Array.from(document.querySelectorAll('button')).filter(visible);
+                const composerButtons = composerContainer
+                    ? Array.from(composerContainer.querySelectorAll('button')).filter(visible)
+                    : allButtons;
+
+                const generationActive = allButtons.some(button => {
                     const label = ((button.getAttribute('aria-label') || '') + ' ' +
                         (button.getAttribute('data-testid') || '')).toLowerCase();
                     return label.includes('stop') || label.includes('cancel') ||
                         label.includes('generating');
                 });
+
+                // Check for the dictation button becoming a stop button, or
+                // any aria-disabled="false" send button appearing.
+                const sendVisible = composerButtons.some(button => {
+                    const label = ((button.getAttribute('aria-label') || '') + ' ' +
+                        (button.getAttribute('data-testid') || '')).toLowerCase();
+                    return label.includes('send');
+                });
+
                 return {
                     prompt_exists: Boolean(prompt),
                     prompt_visible: visible(prompt),
                     prompt_count: document.querySelectorAll(
-                        "textarea[data-testid='grok-chat-input'], div[contenteditable='true'][role='textbox'], textarea"
+                        "div[contenteditable='true'][role='combobox'], " +
+                        "div.tiptap.ProseMirror[contenteditable='true'], " +
+                        "div[contenteditable='true'][role='textbox'], " +
+                        "textarea[data-testid='grok-chat-input'], " +
+                        "textarea"
                     ).length,
                     generation_active: generationActive,
+                    send_visible: sendVisible,
                 };
             }"""
         )

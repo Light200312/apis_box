@@ -6,6 +6,7 @@ from typing import Any
 from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
 from browser_manager import BrowserManager
+from automation_errors import ResponseUncertainError, SafeToFallbackError
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class ClaudeAutomation:
     async def ask_claude(self, prompt: str) -> str:
         ask_started = time.monotonic()
         page = None
+        submission_started = False
         try:
             page = await self._find_claude_page()
             await self._ensure_logged_in(page)
@@ -47,14 +49,23 @@ class ClaudeAutomation:
             }
 
             await prompt_input.fill(prompt)
+            # From this point a browser/provider failure is ambiguous.  Do not
+            # send the prompt to ChatGPT as a "fallback" and risk duplicate work.
+            submission_started = True
             await prompt_input.press("Enter")
 
             return await self._read_new_response(page, previous_candidates, previous_text_by_key)
         except PlaywrightTimeoutError as error:
-            raise RuntimeError(
+            error_type = ResponseUncertainError if submission_started else SafeToFallbackError
+            raise error_type(
                 "Claude did not expose its prompt composer in time. "
                 "Check that the Claude tab is open and logged in."
             ) from error
+        except Exception as error:
+            if isinstance(error, (SafeToFallbackError, ResponseUncertainError)):
+                raise
+            error_type = ResponseUncertainError if submission_started else SafeToFallbackError
+            raise error_type(str(error) or "Claude automation could not complete the request.") from error
         finally:
             logger.info("[TIMING] total=%.3fs", time.monotonic() - ask_started)
 
